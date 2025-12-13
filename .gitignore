@@ -1,4 +1,9 @@
+# clion build
 cmake-build-*/
 .idea/
 .vs/
 .code/
+
+# cli build
+build/*
+help.txt
