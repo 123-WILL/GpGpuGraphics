@@ -1,27 +1,29 @@
-#include <iostream>
-#include "kernels.cuh"
+#include "core/Window.h"
+#include "cuda/kernels.cuh"
+
+namespace
+{
+    constexpr UINT WIDTH = 1280;
+    constexpr UINT HEIGHT = 720;
+}
 
 int main()
 {
-    int N = 1<<20;
-    float* x = (float*)malloc(N * sizeof(float));
-    float* y = (float*)malloc(N * sizeof(float));
+    using namespace ggg;
 
-    for (int i = 0; i < N; i++)
+    Window window(WIDTH, HEIGHT);
+    bool running = true;
+    const auto startTime = std::chrono::steady_clock::now();
+
+    while (running)
     {
-        x[i] = 1.0f;
-        y[i] = 2.0f;
+        running = window.PumpMessages();
+        const float timeSeconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count();
+
+        Window::FrameContext frameCtx = window.BeginFrame();
+        cuda::LaunchFillSurface(frameCtx.surface, frameCtx.width, frameCtx.height, timeSeconds, frameCtx.stream);
+        window.EndFrame(frameCtx);
     }
 
-    saxpy(N, 2.0f, x, y);
-
-    float maxError = 0.0f;
-    for (int i = 0; i < N; i++)
-    {
-        maxError = std::max(maxError, abs(y[i]-4.0f));
-    }
-    printf("Max error: %f\n", maxError);
-
-    free(x);
-    free(y);
+    return 0;
 }

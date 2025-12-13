@@ -9,13 +9,17 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 set(CPU_SOURCES
+        src/core/Window.cpp
+        src/core/Window.h
         src/main.cpp
 )
 
 set(CUDA_SOURCES
-        src/kernels.cu
-        src/kernels.cuh
+        src/cuda/kernels.cu
+        src/cuda/kernels.cuh
 )
+
+find_package(CUDAToolkit REQUIRED)
 
 add_executable(GpGpuGraphics)
 
@@ -35,6 +39,15 @@ set_target_properties(GpGpuGraphics
 target_include_directories(GpGpuGraphics
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CUDAToolkit_INCLUDE_DIRS}
+)
+
+target_link_libraries(GpGpuGraphics
+    PRIVATE
+        d3d11
+        dxgi
+        CUDA::cuda_driver
+        CUDA::cudart
 )
 
 target_compile_options(GpGpuGraphics
