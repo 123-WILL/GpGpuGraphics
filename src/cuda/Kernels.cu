@@ -35,7 +35,7 @@ namespace
                 return VertexShaderOut
                 {
                     .n = ((vals[Is].n * weights[Is]) + ...),
-                    .uv = ((vals[Is].uv * weights[Is]) + ...),
+                    .uv = ((vals[Is].uv * weights[Is]) + ...)
                 };
             } (std::make_index_sequence<3>());
         }
@@ -43,48 +43,26 @@ namespace
 
     __device__ Vec4f VertexShader(const Vertex& vert, const cuda::UniformBuffer& uniformBuffer, VertexShaderOut& out)
     {
-        const Vec3f p = vert.p;
-        const float s = 0.85f;
-        const float ang = uniformBuffer.m_timeSeconds * 0.6f;
-        const float c = cosf(ang);
-        const float sn = sinf(ang);
+        Vec4f pos { vert.p.x(), vert.p.y(), vert.p.z(), 1.f };
 
-        const Vec3f pWorld{
-            (p.x() * c + p.z() * sn) * s,
-            p.y() * s - 0.25f,
-            (-p.x() * sn + p.z() * c) * s
-        };
+        const Vec4f viewPos = uniformBuffer.m_viewMatrix * uniformBuffer.m_modelMatrix * pos;
 
-        const Vec3f nIn = vert.n;
-        const Vec3f nWorld{
-            (nIn.x() * c + nIn.z() * sn),
-            nIn.y(),
-            (-nIn.x() * sn + nIn.z() * c)
-        };
+        Mat3f normalMatrix = Mat3f{
+            uniformBuffer.m_modelMatrix[0].xyz(),
+            uniformBuffer.m_modelMatrix[1].xyz(),
+            uniformBuffer.m_modelMatrix[2].xyz()
+        }.Inverse().Transpose();
 
-        out.n = nWorld;
+        out.n = (normalMatrix * vert.n).Normalized();
         out.uv = vert.uv;
 
-        // View + projection (right-handed, camera looks down -Z)
-        const Vec3f camPos{0.0f, 0.0f, 2.2f};
-        const Vec3f pView = pWorld - camPos;
-        const float fovY = 60.0f * (3.14159265358979323846f / 180.0f);
-        const float f = 1.0f / tanf(fovY * 0.5f);
-
-        Vec4f clip{
-            (pView.x() * f / uniformBuffer.m_aspectRatio),
-            (pView.y() * f),
-            pView.z(),
-            -pView.z()
-        };
-        return clip;
+        return uniformBuffer.m_projectionMatrix * viewPos;
     }
 
     __device__ Vec4f FragmentShader(const VertexShaderOut& in)
     {
-        const Vec3f n = in.n.Normalized();
         const Vec3f lightDir{0.3508772f, 0.9022557f, 0.2506266f}; // normalize({0.35,0.9,0.25})
-        const float ndotl = fmaxf(0.0f, Dot(n, lightDir));
+        const float ndotl = fmaxf(0.0f, Dot(in.n, lightDir));
         return Vec4f{0.20f + ndotl * (0.70f), 0.22f + ndotl * (0.60f), 0.25f + ndotl * (0.50f), 1.0f};
     }
 

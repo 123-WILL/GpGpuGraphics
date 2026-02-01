@@ -39,6 +39,9 @@ namespace ggg
         [[nodiscard]] GGG_CUDA constexpr T& w() requires (dimension >= 4) { return m_values[3]; }
         [[nodiscard]] GGG_CUDA constexpr const T& w() const requires (dimension >= 4) { return m_values[3]; }
 
+        [[nodiscard]] GGG_CUDA constexpr Vector<T, 2> xy() const requires (dimension >= 2) { return Vector<T, 2>{ m_values[0], m_values[1] }; }
+        [[nodiscard]] GGG_CUDA constexpr Vector<T, 3> xyz() const requires (dimension >= 3) { return Vector<T, 3>{ m_values[0], m_values[1], m_values[2] }; }
+
         [[nodiscard]] friend GGG_CUDA constexpr Vector operator+(const Vector& lhs, const Vector& rhs)
         {
             return [&] <std::size_t... Is> (std::index_sequence<Is...>) -> Vector

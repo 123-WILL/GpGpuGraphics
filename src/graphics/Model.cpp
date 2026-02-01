@@ -105,6 +105,12 @@ Model::Model(const std::string& modelName)
     cudaMemcpy(m_cudaIndexBuffer, m_indices.data(), m_indices.size() * sizeof(decltype(m_indices)::value_type), cudaMemcpyHostToDevice);
 }
 
+Model::~Model()
+{
+    cudaFree(m_cudaVertexBuffer);
+    cudaFree(m_cudaIndexBuffer);
+}
+
 const std::vector<Vertex>& Model::GetVertices() const noexcept
 {
     return m_vertices;

@@ -11,6 +11,9 @@ namespace ggg::cuda
 {
     struct UniformBuffer
     {
+        Mat4f m_modelMatrix;
+        Mat4f m_viewMatrix;
+        Mat4f m_projectionMatrix;
         float m_timeSeconds;
         float m_aspectRatio;
     };

@@ -18,6 +18,7 @@ namespace ggg
     {
     public:
         explicit Model(const std::string& modelName);
+        ~Model();
 
         [[nodiscard]] const std::vector<Vertex>& GetVertices() const noexcept;
         [[nodiscard]] const std::vector<std::uint32_t>& GetIndices() const noexcept;
