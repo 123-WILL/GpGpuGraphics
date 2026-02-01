@@ -6,24 +6,24 @@
 
 using namespace ggg;
 
-#define CHECK_HR(expr)                                                                                              \
-    do                                                                                                              \
-    {                                                                                                               \
-        const HRESULT hr__ = (expr);                                                                                \
-        if (FAILED(hr__))                                                                                           \
-        {                                                                                                           \
-            throw std::runtime_error(std::string(#expr " failed with HRESULT 0x") + std::to_string(hr__));          \
-        }                                                                                                           \
+#define CHECK_HR(expr)                                                                                      \
+    do                                                                                                      \
+    {                                                                                                       \
+        const HRESULT hr__ = (expr);                                                                        \
+        if (FAILED(hr__))                                                                                   \
+        {                                                                                                   \
+            throw std::runtime_error(std::string(#expr " failed with HRESULT 0x") + std::to_string(hr__));  \
+        }                                                                                                   \
     } while (0)
 
-#define CHECK_CUDA(expr)                                                                                            \
-    do                                                                                                              \
-    {                                                                                                               \
-        const cudaError_t err__ = (expr);                                                                           \
-        if (err__ != cudaSuccess)                                                                                   \
-        {                                                                                                           \
-            throw std::runtime_error(std::string(#expr ": ") + cudaGetErrorString(err__));                          \
-        }                                                                                                           \
+#define CHECK_CUDA(expr)                                                                                    \
+    do                                                                                                      \
+    {                                                                                                       \
+        const cudaError_t err__ = (expr);                                                                   \
+        if (err__ != cudaSuccess)                                                                           \
+        {                                                                                                   \
+            throw std::runtime_error(std::string(#expr ": ") + cudaGetErrorString(err__));                  \
+        }                                                                                                   \
     } while (0)
 
 namespace

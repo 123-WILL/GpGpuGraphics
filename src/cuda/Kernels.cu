@@ -1,11 +1,25 @@
 #include "Kernels.cuh"
 
+#include <array>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <cuda_runtime.h>
 #include <surface_indirect_functions.h>
 #include <surface_types.h>
 
 using namespace ggg;
+
+#define CHECK_CUDA(expr)                                                                        \
+    do                                                                                          \
+    {                                                                                           \
+        const cudaError_t err__ = (expr);                                                       \
+        if (err__ != cudaSuccess)                                                               \
+        {                                                                                       \
+            throw std::runtime_error(std::string(#expr ": ") + cudaGetErrorString(err__));      \
+        }                                                                                       \
+    } while (0)
 
 namespace
 {
@@ -13,14 +27,25 @@ namespace
     {
         Vec3f n{};
         Vec2f uv{};
-        float viewZ{};
+
+        __device__ static VertexShaderOut Interpolate(const std::array<VertexShaderOut, 3>& vals, const std::array<float, 3>& weights)
+        {
+            return [&] <std::size_t... Is> (std::index_sequence<Is...>) -> VertexShaderOut
+            {
+                return VertexShaderOut
+                {
+                    .n = ((vals[Is].n * weights[Is]) + ...),
+                    .uv = ((vals[Is].uv * weights[Is]) + ...),
+                };
+            } (std::make_index_sequence<3>());
+        }
     };
 
-    __device__ Vec4f VertexShader(const Vertex& vert, float timeSeconds, float aspect, VertexShaderOut& out)
+    __device__ Vec4f VertexShader(const Vertex& vert, const cuda::UniformBuffer& uniformBuffer, VertexShaderOut& out)
     {
         const Vec3f p = vert.p;
         const float s = 0.85f;
-        const float ang = timeSeconds * 0.6f;
+        const float ang = uniformBuffer.m_timeSeconds * 0.6f;
         const float c = cosf(ang);
         const float sn = sinf(ang);
 
@@ -43,13 +68,11 @@ namespace
         // View + projection (right-handed, camera looks down -Z)
         const Vec3f camPos{0.0f, 0.0f, 2.2f};
         const Vec3f pView = pWorld - camPos;
-        out.viewZ = -pView.z();
-
         const float fovY = 60.0f * (3.14159265358979323846f / 180.0f);
         const float f = 1.0f / tanf(fovY * 0.5f);
 
         Vec4f clip{
-            (pView.x() * f / aspect),
+            (pView.x() * f / uniformBuffer.m_aspectRatio),
             (pView.y() * f),
             pView.z(),
             -pView.z()
@@ -74,88 +97,109 @@ namespace
         return make_uchar4(r, g, b, a);
     }
 
+    // Grid size: (ceil(surfaceSize.x / 16), ceil(surfaceSize.y / 16), 1); Block size: (16, 16, 1)
     __global__ void ClearKernel(cudaSurfaceObject_t surface,
-                                unsigned width,
-                                unsigned height,
-                                float timeSeconds,
-                                unsigned int* depthBuffer)
+                                Vec2u surfaceSize,
+                                std::uint32_t* depthBuffer)
     {
         const unsigned x = blockIdx.x * blockDim.x + threadIdx.x;
         const unsigned y = blockIdx.y * blockDim.y + threadIdx.y;
-        if (x >= width || y >= height)
+        if (x >= surfaceSize.x() || y >= surfaceSize.y())
         {
             return;
         }
-        static constexpr unsigned int FLT_MAX_BITS = 0x7f7fffffU;
-        depthBuffer[y * width + x] = FLT_MAX_BITS;
+        static constexpr std::uint32_t FLT_MAX_BITS = 0x7f7fffffU;
+        depthBuffer[y * surfaceSize.x() + x] = FLT_MAX_BITS;
         surf2Dwrite(ToRGBA8(Vec4f{0.f, 0.f, 0.f, 1.0f}), surface, static_cast<int>(x * sizeof(uchar4)), static_cast<int>(y));
     }
 
-    __global__ void DrawKernel(cudaSurfaceObject_t surface,
-                               unsigned width,
-                               unsigned height,
-                               float timeSeconds,
-                               unsigned int* __restrict__ depthBuffer,
-                               const Vertex* __restrict__ cudaVertexBuffer,
-                               std::size_t vertexCount,
-                               const std::uint32_t* __restrict__ cudaIndexBuffer,
-                               std::size_t indexCount)
+    // Grid size: (ceil(vertex_count / 256), 1, 1); Block size: (256, 1, 1)
+    __global__ void TransformVerticesKernel(const Vertex* cudaVertexBuffer,
+                                            std::size_t vertexCount,
+                                            const cuda::UniformBuffer* uniformBuffer,
+                                            std::pair<VertexShaderOut, Vec4f>* transformedVertexCache)
     {
-        const std::size_t triCount = indexCount / 3;
-        const std::size_t triId = blockIdx.x;
-        if (triId >= triCount)
+        std::size_t vertexIdx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (vertexIdx >= vertexCount)
         {
             return;
         }
+        transformedVertexCache[vertexIdx].second = VertexShader(
+            cudaVertexBuffer[vertexIdx], *uniformBuffer, transformedVertexCache[vertexIdx].first
+        );
+    }
 
-        const float aspect = static_cast<float>(width) / static_cast<float>(height);
-
-        const std::uint32_t i0 = cudaIndexBuffer[triId * 3 + 0];
-        const std::uint32_t i1 = cudaIndexBuffer[triId * 3 + 1];
-        const std::uint32_t i2 = cudaIndexBuffer[triId * 3 + 2];
-        if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+    // Grid size: (triangle_count, 1, 1); Block size: (16, 16, 1)
+    __global__ void RasterizeAndShadeKernel(cudaSurfaceObject_t renderSurface,
+                                            std::uint32_t* depthBuffer,
+                                            Vec2u surfaceSize,
+                                            const std::pair<VertexShaderOut, Vec4f>* transformedVertexCache,
+                                            const std::uint32_t* cudaIndexBuffer,
+                                            std::size_t indexCount)
+    {
+        const std::size_t triIdx = blockIdx.x;
+        if (triIdx >= indexCount / 3)
         {
             return;
         }
+        const std::uint32_t i0 = cudaIndexBuffer[triIdx * 3 + 0];
+        const std::uint32_t i1 = cudaIndexBuffer[triIdx * 3 + 1];
+        const std::uint32_t i2 = cudaIndexBuffer[triIdx * 3 + 2];
 
-        VertexShaderOut vsOut0{};
-        VertexShaderOut vsOut1{};
-        VertexShaderOut vsOut2{};
+        const std::array<VertexShaderOut, 3> vsOut{
+            transformedVertexCache[i0].first,
+            transformedVertexCache[i1].first,
+            transformedVertexCache[i2].first
+        };
 
         // clip space [(-w, -w) (bottom left), (w, w) (top right)]
-        const Vec4f clip0 = VertexShader(cudaVertexBuffer[i0], timeSeconds, aspect, vsOut0);
-        const Vec4f clip1 = VertexShader(cudaVertexBuffer[i1], timeSeconds, aspect, vsOut1);
-        const Vec4f clip2 = VertexShader(cudaVertexBuffer[i2], timeSeconds, aspect, vsOut2);
-
-        if (clip0.w() == 0.0f || clip1.w() == 0.0f || clip2.w() == 0.0f)
+        const std::array<Vec4f, 3> clipSpace{
+            transformedVertexCache[i0].second,
+            transformedVertexCache[i1].second,
+            transformedVertexCache[i2].second
+        };
+        for (const Vec4f& c : clipSpace)
         {
-            return;
+            if (c.w() == 0.f)
+            {
+                return;
+            }
         }
 
-        // NDC [(-1, -1) (bottom left), (1, 1) (top right)]
-        const Vec2f ndc0{clip0.x() / clip0.w(), clip0.y() / clip0.w()};
-        const Vec2f ndc1{clip1.x() / clip1.w(), clip1.y() / clip1.w()};
-        const Vec2f ndc2{clip2.x() / clip2.w(), clip2.y() / clip2.w()};
+        // NDC [(-1, -1, -inf) (bottom left), (1, 1, inf) (top right)]
+        std::array<Vec3f, 3> ndc{};
+        for (std::size_t i = 0; i < 3; ++i)
+        {
+            ndc[i] = Vec3f{
+                clipSpace[i].x() / clipSpace[i].w(),
+                clipSpace[i].y() / clipSpace[i].w(),
+                clipSpace[i].z() / clipSpace[i].w()
+            };
+        }
 
         // pixel space [(0, height-1) (bottom left), (width-1, 0) (top right)]
-        const Vec2f p0{(ndc0.x() * 0.5f + 0.5f) * (static_cast<float>(width) - 1.0f),
-                       (1.0f - (ndc0.y() * 0.5f + 0.5f)) * (static_cast<float>(height) - 1.0f)};
-        const Vec2f p1{(ndc1.x() * 0.5f + 0.5f) * (static_cast<float>(width) - 1.0f),
-                       (1.0f - (ndc1.y() * 0.5f + 0.5f)) * (static_cast<float>(height) - 1.0f)};
-        const Vec2f p2{(ndc2.x() * 0.5f + 0.5f) * (static_cast<float>(width) - 1.0f),
-                       (1.0f - (ndc2.y() * 0.5f + 0.5f)) * (static_cast<float>(height) - 1.0f)};
+        std::array<Vec2f, 3> pixelSpace{};
+        for (std::size_t i = 0; i < 3; ++i)
+        {
+            pixelSpace[i] = Vec2f{
+                (ndc[i].x() * 0.5f + 0.5f) * (static_cast<float>(surfaceSize.x()) - 1.0f),
+                (1.0f - (ndc[i].y() * 0.5f + 0.5f)) * (static_cast<float>(surfaceSize.y()) - 1.0f),
+            };
+        }
 
-        const float minXf = fminf(p0.x(), fminf(p1.x(), p2.x()));
-        const float minYf = fminf(p0.y(), fminf(p1.y(), p2.y()));
-        const float maxXf = fmaxf(p0.x(), fmaxf(p1.x(), p2.x()));
-        const float maxYf = fmaxf(p0.y(), fmaxf(p1.y(), p2.y()));
+        int minX = static_cast<int>(floorf(fminf(pixelSpace[0].x(), fminf(pixelSpace[1].x(), pixelSpace[2].x()))));
+        int minY = static_cast<int>(floorf(fminf(pixelSpace[0].y(), fminf(pixelSpace[1].y(), pixelSpace[2].y()))));
+        int maxX = static_cast<int>(ceilf(fmaxf(pixelSpace[0].x(), fmaxf(pixelSpace[1].x(), pixelSpace[2].x()))));
+        int maxY = static_cast<int>(ceilf(fmaxf(pixelSpace[0].y(), fmaxf(pixelSpace[1].y(), pixelSpace[2].y()))));
+        minX = max(0, min(minX, static_cast<int>(surfaceSize.x()) - 1));
+        minY = max(0, min(minY, static_cast<int>(surfaceSize.y()) - 1));
+        maxX = max(0, min(maxX, static_cast<int>(surfaceSize.x()) - 1));
+        maxY = max(0, min(maxY, static_cast<int>(surfaceSize.y()) - 1));
 
-        const int minX = max(0, min(static_cast<int>(floorf(minXf)), static_cast<int>(width) - 1));
-        const int minY = max(0, min(static_cast<int>(floorf(minYf)), static_cast<int>(height) - 1));
-        const int maxX = max(0, min(static_cast<int>(ceilf(maxXf)), static_cast<int>(width) - 1));
-        const int maxY = max(0, min(static_cast<int>(ceilf(maxYf)), static_cast<int>(height) - 1));
-
-        const float area = (p2.x() - p0.x()) * (p1.y() - p0.y()) - (p2.y() - p0.y()) * (p1.x() - p0.x());
+        const float area = (pixelSpace[2].x() - pixelSpace[0].x()) *
+                           (pixelSpace[1].y() - pixelSpace[0].y()) -
+                           (pixelSpace[2].y() - pixelSpace[0].y()) *
+                           (pixelSpace[1].x() - pixelSpace[0].x());
         if (area == 0.0f)
         {
             return;
@@ -163,19 +207,17 @@ namespace
         const float invArea = 1.0f / area;
         const bool topLeftIsPositive = area > 0.0f;
 
-        // Precompute edge equations for incremental evaluation:
-        // Edge(a,b,p) = A*x + B*y + C, where A=(b.y-a.y), B=-(b.x-a.x), C=(a.y*b.x-a.x*b.y)
-        const float A0 = p2.y() - p1.y();
-        const float B0 = -(p2.x() - p1.x());
-        const float C0 = p1.y() * p2.x() - p1.x() * p2.y();
+        const float A0 = pixelSpace[2].y() - pixelSpace[1].y();
+        const float B0 = -(pixelSpace[2].x() - pixelSpace[1].x());
+        const float C0 = pixelSpace[1].y() * pixelSpace[2].x() - pixelSpace[1].x() * pixelSpace[2].y();
 
-        const float A1 = p0.y() - p2.y();
-        const float B1 = -(p0.x() - p2.x());
-        const float C1 = p2.y() * p0.x() - p2.x() * p0.y();
+        const float A1 = pixelSpace[0].y() - pixelSpace[2].y();
+        const float B1 = -(pixelSpace[0].x() - pixelSpace[2].x());
+        const float C1 = pixelSpace[2].y() * pixelSpace[0].x() - pixelSpace[2].x() * pixelSpace[0].y();
 
-        const float A2 = p1.y() - p0.y();
-        const float B2 = -(p1.x() - p0.x());
-        const float C2 = p0.y() * p1.x() - p0.x() * p1.y();
+        const float A2 = pixelSpace[1].y() - pixelSpace[0].y();
+        const float B2 = -(pixelSpace[1].x() - pixelSpace[0].x());
+        const float C2 = pixelSpace[0].y() * pixelSpace[1].x() - pixelSpace[0].x() * pixelSpace[1].y();
 
         const float stepX0 = A0 * static_cast<float>(blockDim.x);
         const float stepX1 = A1 * static_cast<float>(blockDim.x);
@@ -200,19 +242,16 @@ namespace
                     const float w0 = w0e * invArea;
                     const float w1 = w1e * invArea;
                     const float w2 = w2e * invArea;
-                    const float viewZ = w0 * vsOut0.viewZ + w1 * vsOut1.viewZ + w2 * vsOut2.viewZ;
+                    const float viewZ = w0 * -ndc[0].z() + w1 * -ndc[1].z() + w2 * -ndc[2].z();
                     if (viewZ > 0.0f)
                     {
-                        const int depthIdx = y * static_cast<int>(width) + x;
+                        const int depthIdx = y * static_cast<int>(surfaceSize.x()) + x;
                         const unsigned int newDepthBits = __float_as_uint(viewZ);
                         const unsigned int oldDepthBits = atomicMin(depthBuffer + depthIdx, newDepthBits);
                         if (newDepthBits < oldDepthBits)
                         {
-                            const Vec3f n = (vsOut0.n * w0) + (vsOut1.n * w1) + (vsOut2.n * w2);
-                            const Vec2f uv = (vsOut0.uv * w0) + (vsOut1.uv * w1) + (vsOut2.uv * w2);
-                            const VertexShaderOut fsIn = { .n = n, .uv = uv, .viewZ = viewZ };
-                            const Vec4f color = FragmentShader(fsIn);
-                            surf2Dwrite(ToRGBA8(color), surface, x * static_cast<int>(sizeof(uchar4)), y);
+                            const Vec4f color = FragmentShader(VertexShaderOut::Interpolate(vsOut, {w0, w1, w2}));
+                            surf2Dwrite(ToRGBA8(color), renderSurface, x * static_cast<int>(sizeof(uchar4)), y);
                         }
                     }
                 }
@@ -224,60 +263,69 @@ namespace
         }
     }
 
-    unsigned int* g_depthBuffer = nullptr;
-    std::size_t g_depthCapacity = 0;
-
-    __host__ void EnsureDepthBufferSize(unsigned width, unsigned height)
-    {
-        if (std::size_t neededDepth = width * height; neededDepth > g_depthCapacity)
-        {
-            if (g_depthBuffer)
-            {
-                cudaFree(g_depthBuffer);
-                g_depthBuffer = nullptr;
-            }
-            cudaMalloc(&g_depthBuffer, neededDepth * sizeof(unsigned int));
-            g_depthCapacity = neededDepth;
-        }
-    }
+    cuda::UniformBuffer* g_uniformBuffer{};
+    inline constexpr std::size_t MAX_VERTICES_PER_DRAW = 1 << 20;
+    std::pair<VertexShaderOut, Vec4f>* g_transformedVertexCache{};
 }
 
-__host__ void cuda::LaunchClear(cudaSurfaceObject_t surface,
-                                unsigned width,
-                                unsigned height,
-                                float timeSeconds,
+__host__ void cuda::InitCudaGraphics()
+{
+    CHECK_CUDA(cudaMalloc(&g_uniformBuffer, sizeof(UniformBuffer)));
+    CHECK_CUDA(cudaMalloc(&g_transformedVertexCache, sizeof(g_transformedVertexCache[0]) * MAX_VERTICES_PER_DRAW));
+}
+
+__host__ void cuda::StopCudaGraphics()
+{
+    CHECK_CUDA(cudaFree(g_transformedVertexCache));
+    g_transformedVertexCache = nullptr;
+    CHECK_CUDA(cudaFree(g_uniformBuffer));
+    g_uniformBuffer = nullptr;
+}
+
+__host__ void cuda::SetUniformBuffer(const UniformBuffer& uniform)
+{
+    CHECK_CUDA(cudaMemcpy(g_uniformBuffer, &uniform, sizeof(UniformBuffer), cudaMemcpyHostToDevice));
+}
+
+__host__ void cuda::LaunchClear(cudaSurfaceObject_t cudaRenderSurface,
+                                std::uint32_t* cudaDepthBuffer,
+                                Vec2u surfaceSize,
                                 cudaStream_t stream)
 {
-    if (!surface || width == 0 || height == 0)
-    {
-        return;
-    }
-
-    EnsureDepthBufferSize(width, height);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y, 1);
-    ClearKernel<<<grid, block, 0, stream>>>(surface, width, height, timeSeconds, g_depthBuffer);
+    const dim3 grid((surfaceSize.x() + block.x - 1) / block.x, (surfaceSize.y() + block.y - 1) / block.y, 1);
+    ClearKernel<<<grid, block, 0, stream>>>(cudaRenderSurface, surfaceSize, cudaDepthBuffer);
+    CHECK_CUDA(cudaGetLastError());
 }
 
-__host__ void cuda::LaunchDraw(cudaSurfaceObject_t surface,
-                               unsigned width,
-                               unsigned height,
-                               float timeSeconds,
+__host__ void cuda::LaunchDraw(cudaSurfaceObject_t cudaRenderSurface,
+                               std::uint32_t* cudaDepthBuffer,
+                               Vec2u surfaceSize,
                                cudaStream_t stream,
                                const Vertex* cudaVertexBuffer,
                                std::size_t vertexCount,
                                const std::uint32_t* cudaIndexBuffer,
                                std::size_t indexCount)
 {
-    if (!surface || !cudaVertexBuffer || !cudaIndexBuffer ||  width == 0 || height == 0 || vertexCount == 0 || indexCount < 3)
+    if (vertexCount > MAX_VERTICES_PER_DRAW)
     {
-        return;
+        throw std::runtime_error("too many vertices in draw call");
     }
 
-    EnsureDepthBufferSize(width, height);
-
-    const dim3 block(16, 16, 1);
-    const dim3 grid(static_cast<unsigned>(indexCount / 3), 1, 1);
-    DrawKernel<<<grid, block, 0, stream>>>(surface, width, height, timeSeconds, g_depthBuffer, cudaVertexBuffer, vertexCount, cudaIndexBuffer, indexCount);
+    {
+        const int blockSize = 256;
+        const int numBlocks = (static_cast<int>(vertexCount) + blockSize - 1) / blockSize;
+        TransformVerticesKernel<<<numBlocks, blockSize, 0, stream>>>(
+            cudaVertexBuffer, vertexCount, g_uniformBuffer, g_transformedVertexCache
+        );
+        CHECK_CUDA(cudaGetLastError());
+    }
+    {
+        const dim3 blockSize(16, 16, 1);
+        const dim3 numBlocks(static_cast<unsigned>(indexCount / 3), 1, 1);
+        RasterizeAndShadeKernel<<<numBlocks, blockSize, 0, stream>>>(
+            cudaRenderSurface, cudaDepthBuffer, surfaceSize, g_transformedVertexCache, cudaIndexBuffer, indexCount
+        );
+        CHECK_CUDA(cudaGetLastError());
+    }
 }

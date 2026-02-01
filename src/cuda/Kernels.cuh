@@ -1,21 +1,33 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <cuda_runtime.h>
 #include <surface_types.h>
 #include "graphics/Model.h"
+#include "math/Matrix.h"
 
 namespace ggg::cuda
 {
-    void LaunchClear(cudaSurfaceObject_t surface,
-                     unsigned width,
-                     unsigned height,
-                     float timeSeconds,
+    struct UniformBuffer
+    {
+        float m_timeSeconds;
+        float m_aspectRatio;
+    };
+
+    void InitCudaGraphics();
+    void StopCudaGraphics();
+
+    void SetUniformBuffer(const UniformBuffer& uniform);
+
+    void LaunchClear(cudaSurfaceObject_t cudaRenderSurface,
+                     std::uint32_t* cudaDepthBuffer,
+                     Vec2u surfaceSize,
                      cudaStream_t stream);
 
-    void LaunchDraw(cudaSurfaceObject_t surface,
-                    unsigned width,
-                    unsigned height,
-                    float timeSeconds,
+    void LaunchDraw(cudaSurfaceObject_t cudaRenderSurface,
+                    std::uint32_t* cudaDepthBuffer,
+                    Vec2u surfaceSize,
                     cudaStream_t stream,
                     const Vertex* cudaVertexBuffer,
                     std::size_t vertexCount,

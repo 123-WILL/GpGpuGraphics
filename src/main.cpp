@@ -20,20 +20,31 @@ int main()
     const auto [vertexBuffer, vertexCount] = model.GetCudaVertexBuffer();
     const auto [indexBuffer, indexCount] = model.GetCudaIndexBuffer();
 
+    std::uint32_t* cudaDepthBuffer{};
+    cudaMalloc(&cudaDepthBuffer, sizeof(std::uint32_t) * WIDTH * HEIGHT);
+
+    cuda::InitCudaGraphics();
     while (running)
     {
         running = window.DrainMessages();
-        const float timeSeconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count();
         Window::FrameContext frameCtx = window.BeginFrame();
+
+        cuda::SetUniformBuffer(cuda::UniformBuffer{
+            .m_timeSeconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count(),
+            .m_aspectRatio = static_cast<float>(frameCtx.width) / static_cast<float>(frameCtx.height)
+        });
         cuda::LaunchClear(
-            frameCtx.surface, frameCtx.width, frameCtx.height, timeSeconds, frameCtx.stream
+            frameCtx.surface, cudaDepthBuffer, Vec2u{frameCtx.width, frameCtx.height}, frameCtx.stream
         );
         cuda::LaunchDraw(
-            frameCtx.surface, frameCtx.width, frameCtx.height, timeSeconds, frameCtx.stream,
+            frameCtx.surface, cudaDepthBuffer, Vec2u{frameCtx.width, frameCtx.height}, frameCtx.stream,
             vertexBuffer, vertexCount, indexBuffer, indexCount
         );
+
         window.EndFrame(frameCtx);
     }
+    cuda::StopCudaGraphics();
+    cudaFree(cudaDepthBuffer);
 
     return 0;
 }
