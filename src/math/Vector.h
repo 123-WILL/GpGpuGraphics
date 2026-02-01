@@ -202,6 +202,20 @@ namespace ggg
             } (std::make_index_sequence<dimension>());
         }
 
+        [[nodiscard]] friend GGG_CUDA constexpr Vector<T, 3> Cross(const Vector& lhs, const Vector& rhs) requires (N == 2)
+        {
+            return Vector<T, 3>{ T{0}, T{0}, lhs.m_values[0] * rhs.m_values[1] - lhs.m_values[1] * rhs.m_values[0] };
+        }
+
+        [[nodiscard]] friend GGG_CUDA constexpr Vector<T, 3> Cross(const Vector& lhs, const Vector& rhs) requires (N == 3)
+        {
+            return Vector<T, 3>{
+                lhs.m_values[1] * rhs.m_values[2] - lhs.m_values[2] * rhs.m_values[1],
+                lhs.m_values[2] * rhs.m_values[0] - lhs.m_values[0] * rhs.m_values[2],
+                lhs.m_values[0] * rhs.m_values[1] - lhs.m_values[1] * rhs.m_values[0]
+            };
+        }
+
         [[nodiscard]] T Length() const requires std::floating_point<T>
         {
             return std::sqrt(Dot(*this, *this));

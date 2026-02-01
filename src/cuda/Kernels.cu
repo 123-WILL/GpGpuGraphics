@@ -28,7 +28,7 @@ namespace
         Vec3f n{};
         Vec2f uv{};
 
-        __device__ static VertexShaderOut Interpolate(const std::array<VertexShaderOut, 3>& vals, const std::array<float, 3>& weights)
+        __device__ static VertexShaderOut Interpolate(const std::array<VertexShaderOut, 3>& vals, const Vec3f& weights)
         {
             return [&] <std::size_t... Is> (std::index_sequence<Is...>) -> VertexShaderOut
             {
@@ -148,21 +148,14 @@ namespace
         std::array<Vec3f, 3> ndc{};
         for (std::size_t i = 0; i < 3; ++i)
         {
-            ndc[i] = Vec3f{
-                clipSpace[i].x() / clipSpace[i].w(),
-                clipSpace[i].y() / clipSpace[i].w(),
-                clipSpace[i].z() / clipSpace[i].w()
-            };
+            ndc[i] = clipSpace[i].xyz() / clipSpace[i].w();
         }
 
         // pixel space [(0, height-1) (bottom left), (width-1, 0) (top right)]
         std::array<Vec2f, 3> pixelSpace{};
         for (std::size_t i = 0; i < 3; ++i)
         {
-            pixelSpace[i] = Vec2f{
-                (ndc[i].x() * 0.5f + 0.5f) * (static_cast<float>(surfaceSize.x()) - 1.0f),
-                (1.0f - (ndc[i].y() * 0.5f + 0.5f)) * (static_cast<float>(surfaceSize.y()) - 1.0f),
-            };
+            pixelSpace[i] = (ndc[i].xy() * Vec2f{0.5f, -0.5f} + Vec2f{0.5f, 0.5f}) * Vec2f{surfaceSize.x() - 1.0f, surfaceSize.y() - 1.0f};
         }
 
         int minX = static_cast<int>(floorf(fminf(pixelSpace[0].x(), fminf(pixelSpace[1].x(), pixelSpace[2].x()))));
@@ -174,32 +167,37 @@ namespace
         maxX = max(0, min(maxX, static_cast<int>(surfaceSize.x()) - 1));
         maxY = max(0, min(maxY, static_cast<int>(surfaceSize.y()) - 1));
 
-        const float area = (pixelSpace[2].x() - pixelSpace[0].x()) *
-                           (pixelSpace[1].y() - pixelSpace[0].y()) -
-                           (pixelSpace[2].y() - pixelSpace[0].y()) *
-                           (pixelSpace[1].x() - pixelSpace[0].x());
+        const float area = Cross(pixelSpace[2] - pixelSpace[0], pixelSpace[1] - pixelSpace[0]).z();
         if (area == 0.0f)
         {
             return;
         }
         const float invArea = 1.0f / area;
-        const bool topLeftIsPositive = area > 0.0f;
 
-        const float A0 = pixelSpace[2].y() - pixelSpace[1].y();
-        const float B0 = -(pixelSpace[2].x() - pixelSpace[1].x());
-        const float C0 = pixelSpace[1].y() * pixelSpace[2].x() - pixelSpace[1].x() * pixelSpace[2].y();
-
-        const float A1 = pixelSpace[0].y() - pixelSpace[2].y();
-        const float B1 = -(pixelSpace[0].x() - pixelSpace[2].x());
-        const float C1 = pixelSpace[2].y() * pixelSpace[0].x() - pixelSpace[2].x() * pixelSpace[0].y();
-
-        const float A2 = pixelSpace[1].y() - pixelSpace[0].y();
-        const float B2 = -(pixelSpace[1].x() - pixelSpace[0].x());
-        const float C2 = pixelSpace[0].y() * pixelSpace[1].x() - pixelSpace[0].x() * pixelSpace[1].y();
-
-        const float stepX0 = A0 * static_cast<float>(blockDim.x);
-        const float stepX1 = A1 * static_cast<float>(blockDim.x);
-        const float stepX2 = A2 * static_cast<float>(blockDim.x);
+        // Edge functions for barycentric weights:
+        // w = edgeMat * Vec3f{px, py, 1}, where each row is an edge equation (A*x + B*y + C).
+        const Mat3f edgeMat{
+            // A coefficients
+            Vec3f{
+                pixelSpace[2].y() - pixelSpace[1].y(),
+                pixelSpace[0].y() - pixelSpace[2].y(),
+                pixelSpace[1].y() - pixelSpace[0].y()
+            },
+            // B coefficients
+            Vec3f{
+                pixelSpace[1].x() - pixelSpace[2].x(),
+                pixelSpace[2].x() - pixelSpace[0].x(),
+                pixelSpace[0].x() - pixelSpace[1].x()
+            },
+            // C coefficients
+            Vec3f{
+                pixelSpace[1].y() * pixelSpace[2].x() - pixelSpace[1].x() * pixelSpace[2].y(),
+                pixelSpace[2].y() * pixelSpace[0].x() - pixelSpace[2].x() * pixelSpace[0].y(),
+                pixelSpace[0].y() * pixelSpace[1].x() - pixelSpace[0].x() * pixelSpace[1].y()
+            }
+        };
+        const Vec3f stepX = edgeMat[0] * (static_cast<float>(blockDim.x));
+        const Vec3f negNdcZ{-ndc[0].z(), -ndc[1].z(), -ndc[2].z()};
 
         for (int y = minY + static_cast<int>(threadIdx.y); y <= maxY; y += static_cast<int>(blockDim.y))
         {
@@ -207,20 +205,16 @@ namespace
             int x = minX + static_cast<int>(threadIdx.x);
             float px = static_cast<float>(x) + 0.5f;
 
-            float w0e = A0 * px + B0 * py + C0;
-            float w1e = A1 * px + B1 * py + C1;
-            float w2e = A2 * px + B2 * py + C2;
+            Vec3f wE = edgeMat * Vec3f{px, py, 1.0f};
 
             for (; x <= maxX; x += static_cast<int>(blockDim.x))
             {
-                const bool inside = topLeftIsPositive ? (w0e >= 0.0f && w1e >= 0.0f && w2e >= 0.0f)
-                                                      : (w0e <= 0.0f && w1e <= 0.0f && w2e <= 0.0f);
-                if (inside)
+                if (std::signbit(area) == std::signbit(wE.x()) &&
+                    std::signbit(area) == std::signbit(wE.y()) &&
+                    std::signbit(area) == std::signbit(wE.z()))
                 {
-                    const float w0 = w0e * invArea;
-                    const float w1 = w1e * invArea;
-                    const float w2 = w2e * invArea;
-                    const float viewZ = w0 * -ndc[0].z() + w1 * -ndc[1].z() + w2 * -ndc[2].z();
+                    const Vec3f bary = wE * invArea;
+                    const float viewZ = Dot(bary, negNdcZ);
                     if (viewZ > 0.0f)
                     {
                         const int depthIdx = y * static_cast<int>(surfaceSize.x()) + x;
@@ -228,15 +222,13 @@ namespace
                         const unsigned int oldDepthBits = atomicMin(depthBuffer + depthIdx, newDepthBits);
                         if (newDepthBits < oldDepthBits)
                         {
-                            const Vec4f color = FragmentShader(VertexShaderOut::Interpolate(vsOut, {w0, w1, w2}));
+                            const Vec4f color = FragmentShader(VertexShaderOut::Interpolate(vsOut, bary));
                             surf2Dwrite(ToRGBA8(color), renderSurface, x * static_cast<int>(sizeof(uchar4)), y);
                         }
                     }
                 }
 
-                w0e += stepX0;
-                w1e += stepX1;
-                w2e += stepX2;
+                wE += stepX;
             }
         }
     }
