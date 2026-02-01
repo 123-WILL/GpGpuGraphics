@@ -2,7 +2,6 @@
 
 #include <stdexcept>
 #include <unordered_map>
-#include <cuda_runtime.h>
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tinyobjloader/tiny_obj_loader.h>
 
@@ -99,17 +98,14 @@ Model::Model(const std::string& modelName)
         }
     }
 
-    cudaMalloc(&m_cudaVertexBuffer, m_vertices.size() * sizeof(decltype(m_vertices)::value_type));
-    cudaMemcpy(m_cudaVertexBuffer, m_vertices.data(), m_vertices.size() * sizeof(decltype(m_vertices)::value_type), cudaMemcpyHostToDevice);
-    cudaMalloc(&m_cudaIndexBuffer, m_indices.size() * sizeof(decltype(m_indices)::value_type));
-    cudaMemcpy(m_cudaIndexBuffer, m_indices.data(), m_indices.size() * sizeof(decltype(m_indices)::value_type), cudaMemcpyHostToDevice);
+    m_cudaVertexBuffer = CudaBuffer<Vertex>(m_vertices.size());
+    m_cudaVertexBuffer.CopyToGpuBuffer(m_vertices);
+
+    m_cudaIndexBuffer = CudaBuffer<std::uint32_t>(m_indices.size());
+    m_cudaIndexBuffer.CopyToGpuBuffer(m_indices);
 }
 
-Model::~Model()
-{
-    cudaFree(m_cudaVertexBuffer);
-    cudaFree(m_cudaIndexBuffer);
-}
+Model::~Model() = default;
 
 const std::vector<Vertex>& Model::GetVertices() const noexcept
 {
@@ -121,12 +117,12 @@ const std::vector<std::uint32_t>& Model::GetIndices() const noexcept
     return m_indices;
 }
 
-std::pair<const Vertex*, std::size_t> Model::GetCudaVertexBuffer() const noexcept
+std::pair<const CudaBuffer<Vertex>&, std::size_t> Model::GetCudaVertexBuffer() const noexcept
 {
     return { m_cudaVertexBuffer, m_vertices.size() };
 }
 
-std::pair<const std::uint32_t*, std::size_t> Model::GetCudaIndexBuffer() const noexcept
+std::pair<const CudaBuffer<std::uint32_t>&, std::size_t> Model::GetCudaIndexBuffer() const noexcept
 {
     return { m_cudaIndexBuffer, m_indices.size() };
 }

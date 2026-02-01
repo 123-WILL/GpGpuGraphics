@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <utility>
 #include <cuda_d3d11_interop.h>
+#include "cuda/CudaMacros.h"
 
 using namespace ggg;
 
@@ -13,16 +14,6 @@ using namespace ggg;
         if (FAILED(hr__))                                                                                   \
         {                                                                                                   \
             throw std::runtime_error(std::string(#expr " failed with HRESULT 0x") + std::to_string(hr__));  \
-        }                                                                                                   \
-    } while (0)
-
-#define CHECK_CUDA(expr)                                                                                    \
-    do                                                                                                      \
-    {                                                                                                       \
-        const cudaError_t err__ = (expr);                                                                   \
-        if (err__ != cudaSuccess)                                                                           \
-        {                                                                                                   \
-            throw std::runtime_error(std::string(#expr ": ") + cudaGetErrorString(err__));                  \
         }                                                                                                   \
     } while (0)
 

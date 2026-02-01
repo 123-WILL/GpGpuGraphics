@@ -11,6 +11,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CPU_SOURCES
         src/core/Window.cpp
         src/core/Window.h
+        src/cuda/CudaBuffer.cpp
+        src/cuda/CudaBuffer.h
         src/graphics/Model.cpp
         src/graphics/Model.h
         src/math/Matrix.h
@@ -25,7 +27,8 @@ set(CUDA_SOURCES
 
 find_package(CUDAToolkit REQUIRED)
 
-add_executable(GpGpuGraphics)
+add_executable(GpGpuGraphics
+        src/cuda/CudaMacros.h)
 
 target_sources(GpGpuGraphics
     PRIVATE

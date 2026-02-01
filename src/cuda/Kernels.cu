@@ -8,18 +8,9 @@
 #include <cuda_runtime.h>
 #include <surface_indirect_functions.h>
 #include <surface_types.h>
+#include "CudaMacros.h"
 
 using namespace ggg;
-
-#define CHECK_CUDA(expr)                                                                        \
-    do                                                                                          \
-    {                                                                                           \
-        const cudaError_t err__ = (expr);                                                       \
-        if (err__ != cudaSuccess)                                                               \
-        {                                                                                       \
-            throw std::runtime_error(std::string(#expr ": ") + cudaGetErrorString(err__));      \
-        }                                                                                       \
-    } while (0)
 
 namespace
 {
@@ -76,7 +67,7 @@ namespace
     }
 
     // Grid size: (ceil(surfaceSize.x / 16), ceil(surfaceSize.y / 16), 1); Block size: (16, 16, 1)
-    __global__ void ClearKernel(cudaSurfaceObject_t surface,
+    __global__ void ClearKernel(cudaSurfaceObject_t renderSurface,
                                 Vec2u surfaceSize,
                                 std::uint32_t* depthBuffer)
     {
@@ -88,7 +79,7 @@ namespace
         }
         static constexpr std::uint32_t FLT_MAX_BITS = 0x7f7fffffU;
         depthBuffer[y * surfaceSize.x() + x] = FLT_MAX_BITS;
-        surf2Dwrite(ToRGBA8(Vec4f{0.f, 0.f, 0.f, 1.0f}), surface, static_cast<int>(x * sizeof(uchar4)), static_cast<int>(y));
+        surf2Dwrite(ToRGBA8(Vec4f{0.f, 0.f, 0.f, 1.0f}), renderSurface, static_cast<int>(x * sizeof(uchar4)), static_cast<int>(y));
     }
 
     // Grid size: (ceil(vertex_count / 256), 1, 1); Block size: (256, 1, 1)
@@ -257,24 +248,24 @@ __host__ void cuda::SetUniformBuffer(const UniformBuffer& uniform)
     CHECK_CUDA(cudaMemcpy(g_uniformBuffer, &uniform, sizeof(UniformBuffer), cudaMemcpyHostToDevice));
 }
 
-__host__ void cuda::LaunchClear(cudaSurfaceObject_t cudaRenderSurface,
-                                std::uint32_t* cudaDepthBuffer,
+__host__ void cuda::LaunchClear(cudaSurfaceObject_t renderSurface,
+                                CudaBuffer<std::uint32_t>& depthBuffer,
                                 Vec2u surfaceSize,
                                 cudaStream_t stream)
 {
     const dim3 block(16, 16, 1);
     const dim3 grid((surfaceSize.x() + block.x - 1) / block.x, (surfaceSize.y() + block.y - 1) / block.y, 1);
-    ClearKernel<<<grid, block, 0, stream>>>(cudaRenderSurface, surfaceSize, cudaDepthBuffer);
+    ClearKernel<<<grid, block, 0, stream>>>(renderSurface, surfaceSize, depthBuffer.GetGpuPtr());
     CHECK_CUDA(cudaGetLastError());
 }
 
-__host__ void cuda::LaunchDraw(cudaSurfaceObject_t cudaRenderSurface,
-                               std::uint32_t* cudaDepthBuffer,
+__host__ void cuda::LaunchDraw(cudaSurfaceObject_t renderSurface,
+                               CudaBuffer<std::uint32_t>& depthBuffer,
                                Vec2u surfaceSize,
                                cudaStream_t stream,
-                               const Vertex* cudaVertexBuffer,
+                               const CudaBuffer<Vertex>& vertexBuffer,
                                std::size_t vertexCount,
-                               const std::uint32_t* cudaIndexBuffer,
+                               const CudaBuffer<std::uint32_t>& indexBuffer,
                                std::size_t indexCount)
 {
     if (vertexCount > MAX_VERTICES_PER_DRAW)
@@ -286,7 +277,7 @@ __host__ void cuda::LaunchDraw(cudaSurfaceObject_t cudaRenderSurface,
         const int blockSize = 256;
         const int numBlocks = (static_cast<int>(vertexCount) + blockSize - 1) / blockSize;
         TransformVerticesKernel<<<numBlocks, blockSize, 0, stream>>>(
-            cudaVertexBuffer, vertexCount, g_uniformBuffer, g_transformedVertexCache
+            vertexBuffer.GetGpuPtr(), vertexCount, g_uniformBuffer, g_transformedVertexCache
         );
         CHECK_CUDA(cudaGetLastError());
     }
@@ -294,7 +285,8 @@ __host__ void cuda::LaunchDraw(cudaSurfaceObject_t cudaRenderSurface,
         const dim3 blockSize(16, 16, 1);
         const dim3 numBlocks(static_cast<unsigned>(indexCount / 3), 1, 1);
         RasterizeAndShadeKernel<<<numBlocks, blockSize, 0, stream>>>(
-            cudaRenderSurface, cudaDepthBuffer, surfaceSize, g_transformedVertexCache, cudaIndexBuffer, indexCount
+            renderSurface, depthBuffer.GetGpuPtr(), surfaceSize, g_transformedVertexCache,
+            indexBuffer.GetGpuPtr(), indexCount
         );
         CHECK_CUDA(cudaGetLastError());
     }

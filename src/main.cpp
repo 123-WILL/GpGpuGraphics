@@ -57,15 +57,14 @@ namespace
 int main()
 {
     Window window(WIDTH, HEIGHT);
+    CudaBuffer<std::uint32_t> depthBuffer(WIDTH * HEIGHT);
+
     bool running = true;
     const auto startTime = std::chrono::steady_clock::now();
 
     Model model("stanford_bunny");
     const auto [vertexBuffer, vertexCount] = model.GetCudaVertexBuffer();
     const auto [indexBuffer, indexCount] = model.GetCudaIndexBuffer();
-
-    std::uint32_t* cudaDepthBuffer{};
-    cudaMalloc(&cudaDepthBuffer, sizeof(std::uint32_t) * WIDTH * HEIGHT);
 
     cuda::InitCudaGraphics();
     while (running)
@@ -80,24 +79,22 @@ int main()
             .m_modelMatrix = InitTranslation(Vec3f{0.0f, -0.25f, 0.0f}) *
                              InitRotationY(timeSeconds * 0.6f) *
                              InitScale(0.85f),
-            .m_viewMatrix = InitTranslation(Vec3f{0.0f, 0.0f, -2.2f}),
+            .m_viewMatrix = InitTranslation(Vec3f{0.0f, 0.0f, 2.2f}).Inverse(),
             .m_projectionMatrix = InitProjection(3.1415f / 3.f, aspectRatio, -0.01f, -1000.f),
             .m_timeSeconds = timeSeconds,
             .m_aspectRatio = aspectRatio,
         });
         cuda::LaunchClear(
-            frameCtx.surface, cudaDepthBuffer, Vec2u{frameCtx.width, frameCtx.height}, frameCtx.stream
+            frameCtx.surface, depthBuffer, Vec2u{frameCtx.width, frameCtx.height}, frameCtx.stream
         );
         cuda::LaunchDraw(
-            frameCtx.surface, cudaDepthBuffer, Vec2u{frameCtx.width, frameCtx.height}, frameCtx.stream,
+            frameCtx.surface, depthBuffer, Vec2u{frameCtx.width, frameCtx.height}, frameCtx.stream,
             vertexBuffer, vertexCount, indexBuffer, indexCount
         );
 
         window.EndFrame(frameCtx);
     }
     cuda::StopCudaGraphics();
-
-    cudaFree(cudaDepthBuffer);
 
     return 0;
 }
