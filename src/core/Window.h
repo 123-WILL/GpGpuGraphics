@@ -30,7 +30,7 @@ namespace ggg
         Window& operator=(Window&& other) noexcept;
         ~Window();
 
-        bool PumpMessages();
+        bool DrainMessages();
         FrameContext BeginFrame();
         void EndFrame(FrameContext& ctx);
 

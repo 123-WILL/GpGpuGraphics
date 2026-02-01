@@ -11,6 +11,10 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CPU_SOURCES
         src/core/Window.cpp
         src/core/Window.h
+        src/graphics/Model.cpp
+        src/graphics/Model.h
+        src/math/Matrix.h
+        src/math/Vector.h
         src/main.cpp
 )
 
@@ -39,6 +43,7 @@ set_target_properties(GpGpuGraphics
 target_include_directories(GpGpuGraphics
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/include
         ${CUDAToolkit_INCLUDE_DIRS}
 )
 
